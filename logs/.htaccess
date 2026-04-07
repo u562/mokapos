@@ -1,0 +1,5 @@
+# Запрет прямого доступа к логам
+<Files "*.log">
+    Order allow,deny
+    Deny from all
+</Files>
