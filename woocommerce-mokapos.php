@@ -212,9 +212,24 @@ register_uninstall_hook(__FILE__, 'mokapos_uninstall');
  * Активация плагина
  */
 function mokapos_activate() {
-    // Проверяем, что класс загружен (на случай если плагины загружены)
+    // Сначала загружаем Logger, так как он нужен другим классам
+    if (!class_exists('MokaPOS\\Logger')) {
+        $logger_file = MOKAPOS_PLUGIN_DIR . 'includes/class-logger.php';
+        if (file_exists($logger_file)) {
+            require_once $logger_file;
+        }
+    }
+    
+    // Затем загружаем API_Client, если нужен
+    if (!class_exists('MokaPOS\\API_Client')) {
+        $api_file = MOKAPOS_PLUGIN_DIR . 'includes/class-api-client.php';
+        if (file_exists($api_file)) {
+            require_once $api_file;
+        }
+    }
+    
+    // Загружаем Cron
     if (!class_exists('MokaPOS\\Cron')) {
-        // Пытаемся загрузить вручную, если автозагрузчик еще не зарегистрирован
         $cron_file = MOKAPOS_PLUGIN_DIR . 'includes/class-cron.php';
         if (file_exists($cron_file)) {
             require_once $cron_file;
@@ -238,7 +253,15 @@ function mokapos_activate() {
  * Деактивация плагина
  */
 function mokapos_deactivate() {
-    // Проверяем, что класс загружен
+    // Сначала загружаем Logger, так как он нужен другим классам
+    if (!class_exists('MokaPOS\\Logger')) {
+        $logger_file = MOKAPOS_PLUGIN_DIR . 'includes/class-logger.php';
+        if (file_exists($logger_file)) {
+            require_once $logger_file;
+        }
+    }
+    
+    // Загружаем Cron
     if (!class_exists('MokaPOS\\Cron')) {
         $cron_file = MOKAPOS_PLUGIN_DIR . 'includes/class-cron.php';
         if (file_exists($cron_file)) {

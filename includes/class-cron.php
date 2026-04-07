@@ -17,6 +17,14 @@ class Cron {
      * Активация плагина - регистрация cron задач
      */
     public static function activate() {
+        // Явно загружаем класс Logger если он еще не загружен
+        if (!class_exists('MokaPOS\\Logger')) {
+            $logger_file = MOKAPOS_PLUGIN_DIR . 'includes/class-logger.php';
+            if (file_exists($logger_file)) {
+                require_once $logger_file;
+            }
+        }
+        
         // Регистрация расписаний
         if (!wp_next_scheduled('mokapos_sync_prices_event')) {
             wp_schedule_event(time(), 'hourly', 'mokapos_sync_prices_event');
@@ -35,18 +43,30 @@ class Cron {
         add_action('mokapos_sync_stock_event', [__CLASS__, 'sync_stock']);
         add_action('mokapos_sync_orders_event', [__CLASS__, 'sync_orders']);
         
-        Logger::info('Cron задачи активированы');
+        if (class_exists('MokaPOS\\Logger')) {
+            Logger::info('Cron задачи активированы');
+        }
     }
     
     /**
      * Деактивация плагина - удаление cron задач
      */
     public static function deactivate() {
+        // Явно загружаем класс Logger если он еще не загружен
+        if (!class_exists('MokaPOS\\Logger')) {
+            $logger_file = MOKAPOS_PLUGIN_DIR . 'includes/class-logger.php';
+            if (file_exists($logger_file)) {
+                require_once $logger_file;
+            }
+        }
+        
         wp_clear_scheduled_hook('mokapos_sync_prices_event');
         wp_clear_scheduled_hook('mokapos_sync_stock_event');
         wp_clear_scheduled_hook('mokapos_sync_orders_event');
         
-        Logger::info('Cron задачи деактивированы');
+        if (class_exists('MokaPOS\\Logger')) {
+            Logger::info('Cron задачи деактивированы');
+        }
     }
     
     /**
@@ -57,14 +77,36 @@ class Cron {
             return;
         }
         
+        // Явно загружаем классы если они еще не загружены
+        if (!class_exists('MokaPOS\\Logger')) {
+            $logger_file = MOKAPOS_PLUGIN_DIR . 'includes/class-logger.php';
+            if (file_exists($logger_file)) {
+                require_once $logger_file;
+            }
+        }
+        
+        if (!class_exists('MokaPOS\\API_Client')) {
+            $api_file = MOKAPOS_PLUGIN_DIR . 'includes/class-api-client.php';
+            if (file_exists($api_file)) {
+                require_once $api_file;
+            }
+        }
+        
         try {
-            $api = new API_Client();
+            $api = class_exists('MokaPOS\\API_Client') ? new API_Client() : null;
+            
+            if (!$api) {
+                error_log('MokaPOS: Класс API_Client не найден');
+                return;
+            }
             
             // Получаем все товары из MokaPOS
             $moka_products = $api->get_products();
             
             if (is_wp_error($moka_products)) {
-                Logger::error('Ошибка получения товаров из MokaPOS: ' . $moka_products->get_error_message());
+                if (class_exists('MokaPOS\\Logger')) {
+                    Logger::error('Ошибка получения товаров из MokaPOS: ' . $moka_products->get_error_message());
+                }
                 return;
             }
             
@@ -92,14 +134,22 @@ class Cron {
                     $product->save();
                     $updated++;
                     
-                    Logger::info("Цена товара ID {$woo_product_id} обновлена: {$current_price} -> {$moka_price}");
+                    if (class_exists('MokaPOS\\Logger')) {
+                        Logger::info("Цена товара ID {$woo_product_id} обновлена: {$current_price} -> {$moka_price}");
+                    }
                 }
             }
             
-            Logger::info("Синхронизация цен завершена. Обновлено товаров: {$updated}");
+            if (class_exists('MokaPOS\\Logger')) {
+                Logger::info("Синхронизация цен завершена. Обновлено товаров: {$updated}");
+            }
             
         } catch (\Exception $e) {
-            Logger::error('Ошибка синхронизации цен: ' . $e->getMessage());
+            if (class_exists('MokaPOS\\Logger')) {
+                Logger::error('Ошибка синхронизации цен: ' . $e->getMessage());
+            } else {
+                error_log('MokaPOS: Ошибка синхронизации цен: ' . $e->getMessage());
+            }
         }
     }
     
@@ -111,14 +161,36 @@ class Cron {
             return;
         }
         
+        // Явно загружаем классы если они еще не загружены
+        if (!class_exists('MokaPOS\\Logger')) {
+            $logger_file = MOKAPOS_PLUGIN_DIR . 'includes/class-logger.php';
+            if (file_exists($logger_file)) {
+                require_once $logger_file;
+            }
+        }
+        
+        if (!class_exists('MokaPOS\\API_Client')) {
+            $api_file = MOKAPOS_PLUGIN_DIR . 'includes/class-api-client.php';
+            if (file_exists($api_file)) {
+                require_once $api_file;
+            }
+        }
+        
         try {
-            $api = new API_Client();
+            $api = class_exists('MokaPOS\\API_Client') ? new API_Client() : null;
+            
+            if (!$api) {
+                error_log('MokaPOS: Класс API_Client не найден');
+                return;
+            }
             
             // Получаем все товары из MokaPOS с остатками
             $moka_products = $api->get_products(['include_stock' => true]);
             
             if (is_wp_error($moka_products)) {
-                Logger::error('Ошибка получения товаров из MokaPOS: ' . $moka_products->get_error_message());
+                if (class_exists('MokaPOS\\Logger')) {
+                    Logger::error('Ошибка получения товаров из MokaPOS: ' . $moka_products->get_error_message());
+                }
                 return;
             }
             
@@ -147,14 +219,22 @@ class Cron {
                     $product->save();
                     $updated++;
                     
-                    Logger::info("Остаток товара ID {$woo_product_id} обновлен: {$current_stock} -> {$moka_stock}");
+                    if (class_exists('MokaPOS\\Logger')) {
+                        Logger::info("Остаток товара ID {$woo_product_id} обновлен: {$current_stock} -> {$moka_stock}");
+                    }
                 }
             }
             
-            Logger::info("Синхронизация остатков завершена. Обновлено товаров: {$updated}");
+            if (class_exists('MokaPOS\\Logger')) {
+                Logger::info("Синхронизация остатков завершена. Обновлено товаров: {$updated}");
+            }
             
         } catch (\Exception $e) {
-            Logger::error('Ошибка синхронизации остатков: ' . $e->getMessage());
+            if (class_exists('MokaPOS\\Logger')) {
+                Logger::error('Ошибка синхронизации остатков: ' . $e->getMessage());
+            } else {
+                error_log('MokaPOS: Ошибка синхронизации остатков: ' . $e->getMessage());
+            }
         }
     }
     

@@ -1,26 +1,47 @@
-```
+```php
 # Compiled and build artifacts
 *.pyc
-__pycache__/
+*.o
+*.obj
+dist/
+build/
+target/
 
 # Dependencies
+node_modules/
 vendor/
+*.phar
 composer.lock
 
 # Logs and temp files
 *.log
 *.tmp
+*.swp
+*.swo
 
 # Environment
 .env
 .env.local
-*.env.*
+.env.*
 
 # Editors
 .vscode/
 .idea/
+*.swp
+*.swo
 
 # WordPress/WooCommerce specific
-wp-content/plugins/.DS_Store
+wp-content/cache/
 *.sql
+*.sqlite
+*.db
+
+# Coverage reports
+coverage/
+htmlcov/
+.coverage
+
+# OS generated files
+.DS_Store
+Thumbs.db
 ```
