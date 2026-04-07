@@ -50,11 +50,18 @@ class Logger {
         $timestamp = current_time('mysql');
         $log_entry = "[{$timestamp}] [{$level}] {$message}" . PHP_EOL;
         
-        // Логируем в файл
-        $log_file = MOKAPOS_LOG_DIR . 'mokapos-' . date('Y-m-d') . '.log';
+        // Проверяем наличие константы и определяем fallback если нужно
+        if (!defined('MOKAPOS_LOG_DIR')) {
+            $log_dir = WP_CONTENT_DIR . '/uploads/mokapos-logs/';
+        } else {
+            $log_dir = MOKAPOS_LOG_DIR;
+        }
         
-        if (!file_exists(MOKAPOS_LOG_DIR)) {
-            wp_mkdir_p(MOKAPOS_LOG_DIR);
+        // Логируем в файл
+        $log_file = $log_dir . 'mokapos-' . date('Y-m-d') . '.log';
+        
+        if (!file_exists($log_dir)) {
+            wp_mkdir_p($log_dir);
         }
         
         file_put_contents($log_file, $log_entry, FILE_APPEND);
@@ -67,11 +74,18 @@ class Logger {
      * Очистка старых логов (старше 30 дней)
      */
     public static function cleanup_old_logs($days = 30) {
-        if (!file_exists(MOKAPOS_LOG_DIR)) {
+        // Проверяем наличие константы и определяем fallback если нужно
+        if (!defined('MOKAPOS_LOG_DIR')) {
+            $log_dir = WP_CONTENT_DIR . '/uploads/mokapos-logs/';
+        } else {
+            $log_dir = MOKAPOS_LOG_DIR;
+        }
+        
+        if (!file_exists($log_dir)) {
             return;
         }
         
-        $files = glob(MOKAPOS_LOG_DIR . '*.log');
+        $files = glob($log_dir . '*.log');
         $cutoff = strtotime("-{$days} days");
         
         foreach ($files as $file) {
