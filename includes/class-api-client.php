@@ -133,56 +133,17 @@ class API_Client {
     }
     
     /**
-     * Получение access token через client credentials
+     * Получение access token через client credentials (устаревший метод, оставлен для совместимости)
+     * Примечание: MokaPOS требует OAuth Authorization Code Flow, этот метод может не работать
      */
     public function get_access_token() {
         if (empty($this->client_id) || empty($this->client_secret)) {
             return new \WP_Error('missing_credentials', 'Client ID или Client Secret не настроены');
         }
         
-        $url = $this->api_base . '/oauth/token';
+        Logger::warning('Попытка получения токена через client_credentials. MokaPOS требует OAuth Authorization Code Flow.');
         
-        $headers = [
-            'Content-Type' => 'application/x-www-form-urlencoded',
-            'Accept' => 'application/json',
-        ];
-        
-        $body = [
-            'grant_type' => 'client_credentials',
-            'client_id' => $this->client_id,
-            'client_secret' => $this->client_secret,
-        ];
-        
-        $response = wp_remote_post($url, [
-            'headers' => $headers,
-            'body' => http_build_query($body),
-            'timeout' => 30,
-        ]);
-        
-        if (is_wp_error($response)) {
-            Logger::error('Token request error: ' . $response->get_error_message());
-            return $response;
-        }
-        
-        $status_code = wp_remote_retrieve_response_code($response);
-        $body = wp_remote_retrieve_body($response);
-        $result = json_decode($body, true);
-        
-        if ($status_code === 200 && isset($result['access_token'])) {
-            $this->access_token = $result['access_token'];
-            update_option('mokapos_access_token', $result['access_token']);
-            
-            if (isset($result['refresh_token'])) {
-                $this->refresh_token = $result['refresh_token'];
-                update_option('mokapos_refresh_token', $result['refresh_token']);
-            }
-            
-            Logger::info('Access token получен успешно');
-            return $result;
-        }
-        
-        Logger::error('Failed to get access token: ' . $body);
-        return new \WP_Error('token_error', 'Не удалось получить access token', ['status' => $status_code]);
+        return new \WP_Error('oauth_required', 'Для подключения используйте кнопку "Подключиться к MokaPOS" в настройках плагина. Прямое получение токена через client_credentials не поддерживается MokaPOS.');
     }
     
     /**
