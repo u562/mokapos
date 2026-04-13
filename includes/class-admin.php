@@ -73,13 +73,21 @@ class Admin {
         update_option('mokapos_client_secret', $client_secret);
         
         // Формируем URL для авторизации
-        $redirect_uri = admin_url('admin-post.php?action=mokapos_callback');
+        $redirect_uri = admin_url('admin-post.php?action=mokapos_callback', 'https');
+        
+        // Сохраняем redirect_uri для последующего использования
+        update_option('mokapos_redirect_uri', $redirect_uri);
+        
+        Logger::log('OAuth authorize request. Client ID: ' . $client_id . ', Redirect URI: ' . $redirect_uri, 'debug');
+        
         $auth_url = add_query_arg([
             'client_id' => $client_id,
-            'redirect_uri' => $redirect_uri,
+            'redirect_uri' => urlencode($redirect_uri),
             'response_type' => 'code',
-            'scope' => 'read write'
-        ], 'https://backoffice.mokapos.com/oauth/authorize');
+            'scope' => 'profile sales_type checkout checkout_api transaction library customer report'
+        ], 'https://service-goauth.mokapos.com/oauth/authorize');
+        
+        Logger::log('Redirecting to: ' . $auth_url, 'debug');
         
         // Перенаправляем пользователя на Moka для авторизации
         wp_redirect($auth_url);
@@ -90,7 +98,7 @@ class Admin {
      * Обработка callback от MokaPOS после авторизации
      */
     public function handle_oauth_callback() {
-        check_admin_referer('mokapos_connect_nonce', 'mokapos_nonce');
+        // Не проверяем nonce здесь, так как это callback от внешнего сервиса
         
         $code = sanitize_text_field($_GET['code'] ?? '');
         
@@ -104,7 +112,7 @@ class Admin {
         
         $client_id = get_option('mokapos_client_id');
         $client_secret = get_option('mokapos_client_secret');
-        $redirect_uri = admin_url('admin-post.php?action=mokapos_callback');
+        $redirect_uri = get_option('mokapos_redirect_uri', admin_url('admin-post.php?action=mokapos_callback'));
         
         // Обмениваем code на access token
         $response = wp_remote_post('https://api.mokapos.com/oauth/token', [
@@ -123,6 +131,7 @@ class Admin {
         ]);
         
         if (is_wp_error($response)) {
+            Logger::log('OAuth token request error: ' . $response->get_error_message(), 'error');
             wp_redirect(add_query_arg([
                 'page' => 'mokapos-settings',
                 'error' => 'token_request_failed'
@@ -133,6 +142,8 @@ class Admin {
         $status_code = wp_remote_retrieve_response_code($response);
         $body = wp_remote_retrieve_body($response);
         $result = json_decode($body, true);
+        
+        Logger::log('OAuth token response: ' . print_r($result, true), 'debug');
         
         if ($status_code === 200 && isset($result['access_token'])) {
             update_option('mokapos_access_token', $result['access_token']);
@@ -147,6 +158,7 @@ class Admin {
             ], admin_url('options-general.php')));
             exit;
         } else {
+            Logger::log('OAuth token exchange failed: ' . $body, 'error');
             wp_redirect(add_query_arg([
                 'page' => 'mokapos-settings',
                 'error' => 'token_exchange_failed'
@@ -224,14 +236,14 @@ class Admin {
                         <th scope="row"><?php echo esc_html__('Client ID', 'woocommerce-mokapos'); ?></th>
                         <td>
                             <input type="text" name="mokapos_client_id" value="<?php echo esc_attr(get_option('mokapos_client_id')); ?>" class="regular-text" <?php disabled($is_connected); ?> />
-                            <p class="description"><?php echo esc_html__('Получите Client ID в настройках вашего приложения на backoffice.mokapos.com', 'woocommerce-mokapos'); ?></p>
+                            <p class="description"><?php echo esc_html__('Получите Client ID в настройках вашего приложения на api.mokapos.com', 'woocommerce-mokapos'); ?></p>
                         </td>
                     </tr>
                     <tr>
                         <th scope="row"><?php echo esc_html__('Client Secret', 'woocommerce-mokapos'); ?></th>
                         <td>
                             <input type="password" name="mokapos_client_secret" value="<?php echo esc_attr(get_option('mokapos_client_secret')); ?>" class="regular-text" <?php disabled($is_connected); ?> />
-                            <p class="description"><?php echo esc_html__('Получите Client Secret в настройках вашего приложения на backoffice.mokapos.com', 'woocommerce-mokapos'); ?></p>
+                            <p class="description"><?php echo esc_html__('Получите Client Secret в настройках вашего приложения на api.mokapos.com', 'woocommerce-mokapos'); ?></p>
                         </td>
                     </tr>
                     
@@ -244,6 +256,7 @@ class Admin {
                                 <?php echo esc_html__('Подключиться к MokaPOS', 'woocommerce-mokapos'); ?>
                             </button>
                             <p class="description"><?php echo esc_html__('После нажатия вы будете перенаправлены на сайт MokaPOS для подтверждения доступа.', 'woocommerce-mokapos'); ?></p>
+                            <p class="description" style="color: #d63638;"><strong><?php echo esc_html__('Важно:', 'woocommerce-mokapos'); ?></strong> <?php echo esc_html__('В настройках приложения на api.mokapos.com укажите Redirect URL:', 'woocommerce-mokapos'); ?><br><code><?php echo esc_html(admin_url('admin-post.php?action=mokapos_callback')); ?></code></p>
                         </td>
                     </tr>
                     <?php else: ?>
@@ -325,11 +338,10 @@ class Admin {
             <ol>
                 <li><?php echo esc_html__('Зайдите на', 'woocommerce-mokapos'); ?> <a href="https://api.mokapos.com/oauth/applications/" target="_blank">api.mokapos.com</a> <?php echo esc_html__('и войдите в свой аккаунт.', 'woocommerce-mokapos'); ?></li>
                 <li><?php echo esc_html__('Откройте ваше приложение и нажмите "Edit".', 'woocommerce-mokapos'); ?></li>
-                <li><?php echo esc_html__('Запомните Application ID из URL (например, в https://api.mokapos.com/oauth/applications/1234/edit это 1234).', 'woocommerce-mokapos'); ?></li>
-                <li><?php echo esc_html__('Перейдите на', 'woocommerce-mokapos'); ?> <a href="https://backoffice.mokapos.com/" target="_blank">backoffice.mokapos.com</a> <?php echo esc_html__('и войдите.', 'woocommerce-mokapos'); ?></li>
-                <li><?php echo esc_html__('Откройте ссылку:', 'woocommerce-mokapos'); ?> <code>https://backoffice.mokapos.com/apps/{ваш_app_id}/learn-more</code></li>
-                <li><?php echo esc_html__('Нажмите "Get Started" → "Allow".', 'woocommerce-mokapos'); ?></li>
-                <li><?php echo esc_html__('После подтверждения вы увидите Client ID и Client Secret в настройках приложения.', 'woocommerce-mokapos'); ?></li>
+                <li><?php echo esc_html__('Скопируйте Client ID и Client Secret из настроек приложения.', 'woocommerce-mokapos'); ?></li>
+                <li><?php echo esc_html__('В поле "Redirect URL" в настройках приложения укажите:', 'woocommerce-mokapos'); ?> <br><code><?php echo esc_html(admin_url('admin-post.php?action=mokapos_callback')); ?></code></li>
+                <li><?php echo esc_html__('Сохраните настройки приложения.', 'woocommerce-mokapos'); ?></li>
+                <li><?php echo esc_html__('Вернитесь на эту страницу, введите Client ID и Client Secret, затем нажмите "Подключиться к MokaPOS".', 'woocommerce-mokapos'); ?></li>
             </ol>
         </div>
         <?php
