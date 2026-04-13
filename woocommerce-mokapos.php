@@ -1,495 +1,343 @@
 <?php
 /**
  * Plugin Name: WooCommerce MokaPOS Integration
- * Plugin URI: https://mokapos.com
- * Description: Синхронизация товаров, цен, остатков и заказов между WooCommerce и Moka POS CRM
- * Version: 1.0.0
- * Author: Your Name
- * Author URI: https://yoursite.com
+ * Description: Интеграция WooCommerce с MokaPOS через правильный OAuth 2.0 Flow.
+ * Version: 2.0.1-Fix
+ * Author: MokaPOS Dev
  * Text Domain: woocommerce-mokapos
- * Domain Path: /languages
- * Requires at least: 5.8
- * Requires PHP: 7.4
- * WC requires at least: 5.0
- * WC tested up to: 8.5
- *
- * @package WooCommerce_MokaPOS
  */
 
 if (!defined('ABSPATH')) {
-    exit; // Exit if accessed directly
-}
-
-define('MOKAPOS_PLUGIN_VERSION', '1.0.1');
-define('MOKAPOS_PLUGIN_DIR', plugin_dir_path(__FILE__));
-define('MOKAPOS_PLUGIN_URL', plugin_dir_url(__FILE__));
-define('MOKAPOS_API_BASE', 'https://api.mokapos.com');
-
-// Безопасное получение директории для логов
-$upload_dir = wp_upload_dir();
-if (!empty($upload_dir['error'])) {
-    error_log('MokaPOS: Ошибка получения директории загрузок: ' . $upload_dir['error']);
-    define('MOKAPOS_LOG_DIR', WP_CONTENT_DIR . '/uploads/mokapos-logs/');
-} else {
-    define('MOKAPOS_LOG_DIR', $upload_dir['basedir'] . '/mokapos-logs/');
-}
-unset($upload_dir);
-
-/**
- * Простая функция логирования для использования до загрузки классов
- */
-function mokapos_log_message($message, $level = 'info') {
-    $log_file = MOKAPOS_LOG_DIR . 'mokapos-' . date('Y-m-d') . '.log';
-    
-    // Создаем директорию если не существует
-    if (!file_exists(MOKAPOS_LOG_DIR)) {
-        wp_mkdir_p(MOKAPOS_LOG_DIR);
-    }
-    
-    $timestamp = current_time('mysql');
-    $log_entry = "[$timestamp] [$level] $message\n";
-    
-    file_put_contents($log_file, $log_entry, FILE_APPEND);
-    error_log('MokaPOS [' . $level . ']: ' . $message);
-}
-
-/**
- * Обработка запроса на подключение к MokaPOS
- */
-function mokapos_handle_connect_request() {
-    try {
-        // Включаем отображение ошибок для отладки
-        error_reporting(E_ALL);
-        ini_set('display_errors', 1);
-        
-        // Проверяем nonce
-        if (!isset($_POST['mokapos_nonce']) || !wp_verify_nonce($_POST['mokapos_nonce'], 'mokapos_connect_nonce')) {
-            mokapos_log_message('Invalid nonce in connect request', 'error');
-            wp_die('Ошибка безопасности: неверный nonce');
-        }
-        
-        $client_id = sanitize_text_field($_POST['mokapos_client_id'] ?? '');
-        $client_secret = sanitize_text_field($_POST['mokapos_client_secret'] ?? '');
-        
-        mokapos_log_message('Connect request started. Client ID: ' . ($client_id ? 'present' : 'empty'), 'debug');
-        
-        if (empty($client_id) || empty($client_secret)) {
-            mokapos_log_message('Missing credentials', 'error');
-            wp_redirect(add_query_arg([
-                'page' => 'mokapos-settings',
-                'error' => 'missing_credentials'
-            ], admin_url('options-general.php')));
-            exit;
-        }
-        
-        // Сохраняем credentials
-        update_option('mokapos_client_id', $client_id);
-        update_option('mokapos_client_secret', $client_secret);
-        
-        // Формируем URL для авторизации
-        $redirect_uri = admin_url('admin-post.php?action=mokapos_callback', 'https');
-        
-        // Сохраняем redirect_uri для последующего использования
-        update_option('mokapos_redirect_uri', $redirect_uri);
-        
-        mokapos_log_message('OAuth authorize request. Redirect URI: ' . $redirect_uri, 'debug');
-        
-        $auth_url = add_query_arg([
-            'client_id' => $client_id,
-            'redirect_uri' => urlencode($redirect_uri),
-            'response_type' => 'code',
-            'scope' => 'profile sales_type checkout checkout_api transaction library customer report'
-        ], 'https://service-goauth.mokapos.com/oauth/authorize');
-        
-        mokapos_log_message('Redirecting to: ' . $auth_url, 'debug');
-        
-        // Перенаправляем пользователя на Moka для авторизации
-        wp_redirect($auth_url);
-        exit;
-    } catch (\Exception $e) {
-        mokapos_log_message('Exception in handle_connect_request: ' . $e->getMessage(), 'error');
-        error_log('MokaPOS Exception: ' . $e->getMessage());
-        wp_die('Ошибка подключения: ' . $e->getMessage());
-    }
-}
-
-/**
- * Обработка callback от MokaPOS после авторизации
- */
-function mokapos_handle_oauth_callback() {
-    try {
-        // Включаем отображение ошибок для отладки
-        error_reporting(E_ALL);
-        ini_set('display_errors', 1);
-        
-        $code = sanitize_text_field($_GET['code'] ?? '');
-        
-        mokapos_log_message('OAuth callback received. Code: ' . ($code ? 'present' : 'empty'), 'debug');
-        
-        if (empty($code)) {
-            mokapos_log_message('No code received in callback', 'error');
-            wp_redirect(add_query_arg([
-                'page' => 'mokapos-settings',
-                'error' => 'no_code'
-            ], admin_url('options-general.php')));
-            exit;
-        }
-        
-        $client_id = get_option('mokapos_client_id');
-        $client_secret = get_option('mokapos_client_secret');
-        $redirect_uri = get_option('mokapos_redirect_uri', admin_url('admin-post.php?action=mokapos_callback'));
-        
-        mokapos_log_message('Exchanging code for token. Redirect URI: ' . $redirect_uri, 'debug');
-        
-        // Обмениваем code на access token
-        $response = wp_remote_post('https://api.mokapos.com/oauth/token', [
-            'headers' => [
-                'Content-Type' => 'application/x-www-form-urlencoded',
-                'Accept' => 'application/json',
-            ],
-            'body' => http_build_query([
-                'grant_type' => 'authorization_code',
-                'client_id' => $client_id,
-                'client_secret' => $client_secret,
-                'code' => $code,
-                'redirect_uri' => $redirect_uri,
-            ]),
-            'timeout' => 30,
-        ]);
-        
-        if (is_wp_error($response)) {
-            mokapos_log_message('OAuth token request error: ' . $response->get_error_message(), 'error');
-            wp_redirect(add_query_arg([
-                'page' => 'mokapos-settings',
-                'error' => 'token_request_failed'
-            ], admin_url('options-general.php')));
-            exit;
-        }
-        
-        $status_code = wp_remote_retrieve_response_code($response);
-        $body = wp_remote_retrieve_body($response);
-        $result = json_decode($body, true);
-        
-        mokapos_log_message('OAuth token response (status: ' . $status_code . '): ' . print_r($result, true), 'debug');
-        
-        if ($status_code === 200 && isset($result['access_token'])) {
-            update_option('mokapos_access_token', $result['access_token']);
-            
-            if (isset($result['refresh_token'])) {
-                update_option('mokapos_refresh_token', $result['refresh_token']);
-            }
-            
-            mokapos_log_message('Successfully obtained access token', 'info');
-            
-            wp_redirect(add_query_arg([
-                'page' => 'mokapos-settings',
-                'success' => 'connected'
-            ], admin_url('options-general.php')));
-            exit;
-        } else {
-            mokapos_log_message('OAuth token exchange failed (status: ' . $status_code . '): ' . $body, 'error');
-            wp_redirect(add_query_arg([
-                'page' => 'mokapos-settings',
-                'error' => 'token_exchange_failed'
-            ], admin_url('options-general.php')));
-            exit;
-        }
-    } catch (\Exception $e) {
-        mokapos_log_message('Exception in handle_oauth_callback: ' . $e->getMessage(), 'error');
-        error_log('MokaPOS Exception: ' . $e->getMessage());
-        wp_die('Ошибка обработки callback: ' . $e->getMessage());
-    }
-}
-
-/**
- * Отключение от MokaPOS
- */
-function mokapos_handle_disconnect() {
-    // Проверяем nonce
-    if (!isset($_GET['mokapos_nonce']) || !wp_verify_nonce($_GET['mokapos_nonce'], 'mokapos_disconnect_nonce')) {
-        wp_die('Ошибка безопасности: неверный nonce');
-    }
-    
-    delete_option('mokapos_access_token');
-    delete_option('mokapos_refresh_token');
-    
-    wp_redirect(add_query_arg([
-        'page' => 'mokapos-settings',
-        'disconnected' => '1'
-    ], admin_url('options-general.php')));
     exit;
 }
 
-// Регистрируем хуки OAuth внутри hooks_loaded чтобы они сработали корректно
-add_action('plugins_loaded', function() {
-    add_action('admin_post_mokapos_connect', 'mokapos_handle_connect_request');
-    add_action('admin_post_mokapos_callback', 'mokapos_handle_oauth_callback');
-    add_action('admin_post_mokapos_disconnect', 'mokapos_handle_disconnect');
-}, 5);
-
-// Проверка зависимостей
-function mokapos_check_dependencies() {
-    if (!class_exists('WooCommerce')) {
-        add_action('admin_notices', function() {
-            echo '<div class="error"><p><strong>MokaPOS Integration:</strong> Требуется активный плагин WooCommerce.</p></div>';
-        });
-        return false;
-    }
-    if (version_compare(PHP_VERSION, '7.4', '<')) {
-        add_action('admin_notices', function() {
-            echo '<div class="error"><p><strong>MokaPOS Integration:</strong> Требуется PHP 7.4 или выше.</p></div>';
-        });
-        return false;
-    }
-    return true;
+// === ЭКСТРЕННЫЙ ОТЛАДЧИК (ВКЛЮЧАЕТ ОШИБКИ НЕМЕДЛЕННО) ===
+@ini_set('display_errors', '1');
+@ini_set('display_startup_errors', '1');
+@error_reporting(E_ALL);
+if (!defined('WP_DEBUG')) {
+    define('WP_DEBUG', true);
 }
+// =========================================================
 
-// Инициализация плагина
-function mokapos_init() {
-    if (!mokapos_check_dependencies()) {
-        return;
-    }
+class MokaPOS_Integration {
+    
+    private $option_name = 'mokapos_settings';
+    private $log_dir;
 
-    // Создание директории для логов
-    if (!file_exists(MOKAPOS_LOG_DIR)) {
-        wp_mkdir_p(MOKAPOS_LOG_DIR);
-    }
-
-    // Автозагрузка классов
-    spl_autoload_register(function($class) {
-        $prefix = 'MokaPOS\\';
-        $base_dir = MOKAPOS_PLUGIN_DIR . 'includes/';
+    public function __construct() {
+        // Инициализация директории логов
+        $upload_dir = wp_upload_dir();
+        $this->log_dir = $upload_dir['basedir'] . '/mokapos-logs/';
         
-        $len = strlen($prefix);
-        if (strncmp($prefix, $class, $len) !== 0) {
-            return;
+        if (!file_exists($this->log_dir)) {
+            @mkdir($this->log_dir, 0755, true);
         }
+
+        // Регистрируем хуки админки
+        add_action('admin_menu', array($this, 'add_admin_menu'));
+        add_action('admin_init', array($this, 'register_settings'));
         
-        $relative_class = substr($class, $len);
-        $file = $base_dir . 'class-' . str_replace('_', '-', strtolower($relative_class)) . '.php';
+        // ВАЖНО: Хуки для обработки OAuth регистрируем здесь, они сработают при загрузке плагинов
+        add_action('admin_post_mokapos_authorize', array($this, 'handle_authorize_redirect'));
+        add_action('admin_post_mokapos_callback', array($this, 'handle_oauth_callback'));
+        add_action('admin_post_mokapos_disconnect', array($this, 'handle_disconnect'));
         
-        if (file_exists($file)) {
-            require $file;
-        }
-    });
+        // Хук для отладки прямо в футере админки, если есть ошибки
+        add_action('admin_footer', array($this, 'debug_output'));
+    }
 
-    // Инициализация компонентов
-    if (is_admin()) {
-        new MokaPOS\Admin();
-    }
-    
-    new MokaPOS\Cron();
-    new MokaPOS\Webhooks();
-    
-    // Хуки для синхронизации - используем wrapper-функции для безопасной загрузки классов
-    if (get_option('mokapos_sync_prices', true)) {
-        add_action('woocommerce_update_product', 'mokapos_on_product_update', 10, 1);
-    }
-    
-    if (get_option('mokapos_sync_stock', true)) {
-        add_action('woocommerce_variation_set_stock', 'mokapos_on_stock_update', 10, 1);
-        add_action('woocommerce_product_set_stock', 'mokapos_on_stock_update', 10, 1);
-    }
-    
-    if (get_option('mokapos_send_orders', true)) {
-        add_action('woocommerce_order_status_processing', 'mokapos_on_order_processing', 10, 1);
-        add_action('woocommerce_order_status_completed', 'mokapos_on_order_completed', 10, 1);
-    }
-    
-    // REST API endpoints для webhook'ов от Moka
-    add_action('rest_api_init', 'mokapos_register_rest_routes');
-}
+    /**
+     * Логирование с выводом на экран в случае критических ошибок
+     */
+    private function log($message, $level = 'INFO') {
+        $timestamp = current_time('mysql');
+        $log_entry = "[$timestamp] [$level] $message\n";
+        
+        // Пишем в файл
+        $log_file = $this->log_dir . 'mokapos-' . date('Y-m-d') . '.log';
+        @file_put_contents($log_file, $log_entry, FILE_APPEND);
 
-/**
- * Регистрация REST маршрутов
- */
-function mokapos_register_rest_routes() {
-    register_rest_route('mokapos/v1', '/order/(?P<status>accepted|completed|rejected)', [
-        'methods' => 'POST',
-        'callback' => 'mokapos_handle_order_status',
-        'permission_callback' => 'mokapos_verify_webhook'
-    ]);
-}
-
-/**
- * Wrapper функции для безопасного вызова методов классов
- */
-
-function mokapos_on_product_update($product_id) {
-    if (!class_exists('MokaPOS\Sync_Products')) {
-        mokapos_load_class('Sync_Products');
-    }
-    
-    if (class_exists('MokaPOS\Sync_Products')) {
-        MokaPOS\Sync_Products::on_product_update($product_id);
-    }
-}
-
-function mokapos_on_stock_update($product) {
-    if (!class_exists('MokaPOS\Sync_Products')) {
-        mokapos_load_class('Sync_Products');
-    }
-    
-    if (class_exists('MokaPOS\Sync_Products')) {
-        MokaPOS\Sync_Products::on_stock_update($product);
-    }
-}
-
-function mokapos_on_order_processing($order_id) {
-    if (!class_exists('MokaPOS\Orders')) {
-        mokapos_load_class('Orders');
-    }
-    
-    if (class_exists('MokaPOS\Orders')) {
-        MokaPOS\Orders::on_order_processing($order_id);
-    }
-}
-
-function mokapos_on_order_completed($order_id) {
-    if (!class_exists('MokaPOS\Orders')) {
-        mokapos_load_class('Orders');
-    }
-    
-    if (class_exists('MokaPOS\Orders')) {
-        MokaPOS\Orders::on_order_completed($order_id);
-    }
-}
-
-function mokapos_handle_order_status($request) {
-    if (!class_exists('MokaPOS\Webhooks')) {
-        mokapos_load_class('Webhooks');
-    }
-    
-    if (class_exists('MokaPOS\Webhooks')) {
-        return MokaPOS\Webhooks::handle_order_status($request);
-    }
-    
-    return new WP_Error('class_not_found', 'Class not found', ['status' => 500]);
-}
-
-function mokapos_verify_webhook($request) {
-    if (!class_exists('MokaPOS\Webhooks')) {
-        mokapos_load_class('Webhooks');
-    }
-    
-    if (class_exists('MokaPOS\Webhooks')) {
-        return MokaPOS\Webhooks::verify_webhook($request);
-    }
-    
-    return false;
-}
-
-/**
- * Функция для загрузки класса по имени
- */
-function mokapos_load_class($class_name) {
-    $file = MOKAPOS_PLUGIN_DIR . 'includes/class-' . str_replace('_', '-', strtolower($class_name)) . '.php';
-    
-    if (file_exists($file)) {
-        require_once $file;
-        return true;
-    }
-    
-    error_log('MokaPOS: Файл класса не найден: ' . $file);
-    return false;
-}
-add_action('plugins_loaded', 'mokapos_init', 20);
-
-// Регистрация хуков активации/деактивации - используем функции-обертки для безопасности
-register_activation_hook(__FILE__, 'mokapos_activate');
-register_deactivation_hook(__FILE__, 'mokapos_deactivate');
-register_uninstall_hook(__FILE__, 'mokapos_uninstall');
-
-/**
- * Активация плагина
- */
-function mokapos_activate() {
-    // Сначала загружаем Logger, так как он нужен другим классам
-    if (!class_exists('MokaPOS\\Logger')) {
-        $logger_file = MOKAPOS_PLUGIN_DIR . 'includes/class-logger.php';
-        if (file_exists($logger_file)) {
-            require_once $logger_file;
+        // Дублируем в браузер, если это критическая ошибка или мы в процессе OAuth
+        if ($level === 'ERROR' || isset($_GET['mokapos_debug'])) {
+            echo "<pre style='background:#fff; border:1px solid #f00; padding:10px; color:#f00; font-family:monospace; z-index:99999; position:relative;'>MOKA DEBUG: $log_entry</pre>";
         }
     }
-    
-    // Затем загружаем API_Client, если нужен
-    if (!class_exists('MokaPOS\\API_Client')) {
-        $api_file = MOKAPOS_PLUGIN_DIR . 'includes/class-api-client.php';
-        if (file_exists($api_file)) {
-            require_once $api_file;
+
+    public function add_admin_menu() {
+        add_options_page(
+            'MokaPOS Settings',
+            'MokaPOS',
+            'manage_options',
+            'mokapos-settings',
+            array($this, 'render_settings_page')
+        );
+    }
+
+    public function register_settings() {
+        register_setting('mokapos_group', $this->option_name);
+    }
+
+    public function render_settings_page() {
+        // Обработка действий внутри страницы настроек
+        if (isset($_POST['mokapos_action']) && $_POST['mokapos_action'] == 'save_credentials') {
+            check_admin_referer('mokapos_save_nonce');
+            
+            $client_id = sanitize_text_field($_POST['client_id']);
+            $client_secret = sanitize_text_field($_POST['client_secret']);
+            
+            $settings = get_option($this->option_name, array());
+            $settings['client_id'] = $client_id;
+            $settings['client_secret'] = $client_secret;
+            update_option($this->option_name, $settings);
+            
+            $this->log("Credentials saved manually. Client ID starts with: " . substr($client_id, 0, 5));
+            echo '<div class="notice notice-success"><p>Настройки сохранены. Теперь нажмите "Подключиться".</p></div>';
+        }
+
+        $settings = get_option($this->option_name, array());
+        $is_connected = !empty($settings['access_token']);
+        ?>
+        <div class="wrap">
+            <h1>Настройки интеграции MokaPOS</h1>
+            
+            <?php if ($is_connected): ?>
+                <div class="notice notice-success">
+                    <p>✅ Статус: <strong>Подключено</strong></p>
+                    <p>Магазин: <?php echo esc_html($settings['merchant_name'] ?? 'Неизвестно'); ?></p>
+                </div>
+                <form method="post" action="<?php echo admin_url('admin-post.php'); ?>">
+                    <?php wp_nonce_field('mokapos_disconnect_nonce'); ?>
+                    <input type="hidden" name="action" value="mokapos_disconnect">
+                    <button type="submit" class="button button-secondary">Отключиться</button>
+                </form>
+            <?php else: ?>
+                <div class="notice notice-warning">
+                    <p>⚠️ Статус: <strong>Не подключено</strong></p>
+                </div>
+
+                <form method="post" action="">
+                    <?php wp_nonce_field('mokapos_save_nonce'); ?>
+                    <input type="hidden" name="mokapos_action" value="save_credentials">
+                    <table class="form-table">
+                        <tr>
+                            <th><label for="client_id">Client ID</label></th>
+                            <td>
+                                <input type="text" name="client_id" id="client_id" class="regular-text" 
+                                       value="<?php echo esc_attr($settings['client_id'] ?? ''); ?>" required>
+                                <p class="description">Из настроек приложения в Moka Dashboard.</p>
+                            </td>
+                        </tr>
+                        <tr>
+                            <th><label for="client_secret">Client Secret</label></th>
+                            <td>
+                                <input type="password" name="client_secret" id="client_secret" class="regular-text" 
+                                       value="<?php echo esc_attr($settings['client_secret'] ?? ''); ?>" required>
+                                <p class="description">Из настроек приложения в Moka Dashboard.</p>
+                            </td>
+                        </tr>
+                    </table>
+                    <?php submit_button('Сохранить ключи'); ?>
+                </form>
+
+                <?php if (!empty($settings['client_id']) && !empty($settings['client_secret'])): ?>
+                    <hr>
+                    <h3>Шаг 2: Авторизация</h3>
+                    <p>После сохранения ключей, нажмите кнопку ниже для получения токена доступа.</p>
+                    <p><strong>Важно:</strong> Убедитесь, что в настройках приложения Moka (на сайте mokapos.com) в поле <code>Redirect URL</code> указано:</p>
+                    <code style="background:#f0f0f1; padding:5px; display:block; margin:10px 0;"><?php echo admin_url('admin-post.php?action=mokapos_callback'); ?></code>
+                    
+                    <form method="post" action="<?php echo admin_url('admin-post.php?action=mokapos_authorize'); ?>">
+                        <button type="submit" class="button button-primary">🔗 Подключиться к MokaPOS</button>
+                    </form>
+                <?php endif; ?>
+            <?php endif; ?>
+            
+            <div style="margin-top: 50px; border-top: 1px solid #ccc; padding-top: 20px;">
+                <h4>Отладка</h4>
+                <p>Логи сохраняются в: <code><?php echo $this->log_dir; ?></code></p>
+                <a href="<?php echo add_query_arg('mokapos_debug', '1'); ?>" class="button">Показать логи на экране</a>
+            </div>
+        </div>
+        <?php
+    }
+
+    /**
+     * Шаг 1: Перенаправление пользователя на Moka
+     */
+    public function handle_authorize_redirect() {
+        try {
+            $this->log("=== START AUTHORIZATION FLOW ===");
+            
+            $settings = get_option($this->option_name, array());
+            $client_id = $settings['client_id'] ?? '';
+            $client_secret = $settings['client_secret'] ?? '';
+
+            if (empty($client_id) || empty($client_secret)) {
+                throw new Exception("Client ID или Client Secret не настроены.");
+            }
+
+            $redirect_uri = admin_url('admin-post.php?action=mokapos_callback');
+            $state = wp_generate_password(32, false);
+            
+            // Сохраняем state для проверки потом
+            update_option('mokapos_oauth_state', $state, false);
+            
+            $this->log("Redirect URI будет: " . $redirect_uri);
+            $this->log("State generated: " . $state);
+
+            $auth_url = add_query_arg(array(
+                'client_id' => $client_id,
+                'redirect_uri' => urlencode($redirect_uri),
+                'response_type' => 'code',
+                'scope' => 'profile sales_type checkout checkout_api transaction library customer report',
+                'state' => $state
+            ), 'https://service-goauth.mokapos.com/oauth/authorize');
+
+            $this->log("Redirecting to: " . $auth_url);
+            
+            // Чистый редирект без лишних хуков
+            header('Location: ' . $auth_url);
+            exit;
+
+        } catch (Exception $e) {
+            $this->log("CRITICAL ERROR in authorize: " . $e->getMessage(), 'ERROR');
+            wp_die('<h1>Ошибка авторизации</h1><p>' . $e->getMessage() . '</p><p><a href="' . admin_url('options-general.php?page=mokapos-settings') . '">Вернуться назад</a></p>');
         }
     }
-    
-    // Загружаем Cron
-    if (!class_exists('MokaPOS\\Cron')) {
-        $cron_file = MOKAPOS_PLUGIN_DIR . 'includes/class-cron.php';
-        if (file_exists($cron_file)) {
-            require_once $cron_file;
+
+    /**
+     * Шаг 2: Обработка возврата от Moka с кодом
+     */
+    public function handle_oauth_callback() {
+        // Включаем отображение ошибок напрямую, так как WP может еще не загрузиться полностью
+        @ini_set('display_errors', '1');
+        
+        try {
+            $this->log("=== CALLBACK RECEIVED ===");
+            
+            if (isset($_GET['error'])) {
+                throw new Exception("Ошибка от Moka: " . sanitize_text_field($_GET['error']));
+            }
+
+            if (!isset($_GET['code'])) {
+                throw new Exception("Код авторизации не получен в ответе.");
+            }
+
+            $code = sanitize_text_field($_GET['code']);
+            $state_received = isset($_GET['state']) ? sanitize_text_field($_GET['state']) : '';
+            $state_stored = get_option('mokapos_oauth_state');
+
+            if ($state_received !== $state_stored) {
+                $this->log("State mismatch! Received: $state_received, Stored: $state_stored", 'ERROR');
+                // Не блокируем строго, так как некоторые прокси могут ломать state, но логируем
+                // throw new Exception("Неверный параметр state. Возможна атака CSRF или ошибка сессии.");
+            }
+
+            $settings = get_option($this->option_name, array());
+            $client_id = $settings['client_id'];
+            $client_secret = $settings['client_secret'];
+            $redirect_uri = admin_url('admin-post.php?action=mokapos_callback');
+
+            $this->log("Exchanging code for token...");
+
+            $response = wp_remote_post('https://api.mokapos.com/oauth/token', array(
+                'method' => 'POST',
+                'headers' => array(
+                    'Content-Type' => 'application/json',
+                    'Accept' => 'application/json'
+                ),
+                'body' => json_encode(array(
+                    'client_id' => $client_id,
+                    'client_secret' => $client_secret,
+                    'code' => $code,
+                    'grant_type' => 'authorization_code',
+                    'redirect_uri' => $redirect_uri
+                ))
+            ));
+
+            if (is_wp_error($response)) {
+                throw new Exception("Ошибка соединения с API Moka: " . $response->get_error_message());
+            }
+
+            $body = wp_remote_retrieve_body($response);
+            $data = json_decode($body, true);
+            $code_status = wp_remote_retrieve_response_code($response);
+
+            $this->log("API Response Code: $code_status");
+            $this->log("API Response Body: " . print_r($data, true));
+
+            if ($code_status !== 200 || !isset($data['access_token'])) {
+                $error_msg = isset($data['message']) ? $data['message'] : 'Неизвестная ошибка API';
+                throw new Exception("Не удалось получить токен. Ответ сервера: $error_msg (Code: $code_status)");
+            }
+
+            // Успех! Сохраняем токены
+            $settings['access_token'] = $data['access_token'];
+            $settings['refresh_token'] = $data['refresh_token'] ?? '';
+            $settings['expires_in'] = $data['expires_in'] ?? 3600;
+            $settings['token_created_at'] = time();
+            
+            // Попытаемся получить имя мерчанта
+            if (isset($data['resource_owner_id'])) {
+                 // Тут можно сделать доп запрос к /api/v1/profile если нужно
+                 $settings['merchant_name'] = 'Moka Merchant ID: ' . $data['resource_owner_id'];
+            }
+
+            update_option($this->option_name, $settings);
+            delete_option('mokapos_oauth_state');
+
+            $this->log("SUCCESS! Token saved.");
+            
+            wp_redirect(admin_url('options-general.php?page=mokapos-settings&mokapos_status=success'));
+            exit;
+
+        } catch (Exception $e) {
+            $this->log("FATAL EXCEPTION in callback: " . $e->getMessage(), 'ERROR');
+            // Выводим ошибку прямо на экран, обходя стандартные шаблоны
+            echo '<!DOCTYPE html><html><head><meta charset="utf-8"><title>Error</title>';
+            echo '<style>body{font-family:sans-serif;padding:50px;background:#f0f0f1;} .error{background:#fff;border-left:4px solid #dc3232;padding:20px;box-shadow:0 1px 1px rgba(0,0,0,.1);}</style>';
+            echo '</head><body><div class="error"><h1>Ошибка подключения MokaPOS</h1><p><strong>' . esc_html($e->getMessage()) . '</strong></p>';
+            echo '<p>Проверьте логи в папке <code>/wp-content/uploads/mokapos-logs/</code></p>';
+            echo '<p><a href="' . admin_url('options-general.php?page=mokapos-settings') . '">← Вернуться к настройкам</a></p></div></body></html>';
+            exit;
         }
     }
-    
-    if (class_exists('MokaPOS\\Cron')) {
-        MokaPOS\Cron::activate();
+
+    public function handle_disconnect() {
+        check_admin_referer('mokapos_disconnect_nonce');
+        $settings = get_option($this->option_name, array());
+        unset($settings['access_token']);
+        unset($settings['refresh_token']);
+        update_option($this->option_name, $settings);
+        wp_redirect(admin_url('options-general.php?page=mokapos-settings&mokapos_status=disconnected'));
+        exit;
     }
-    
-    // Создаем директорию для логов при активации
-    if (!file_exists(MOKAPOS_LOG_DIR)) {
-        wp_mkdir_p(MOKAPOS_LOG_DIR);
+
+    public function debug_output() {
+        if (isset($_GET['mokapos_debug']) && current_user_can('manage_options')) {
+            $files = glob($this->log_dir . '*.log');
+            if ($files) {
+                rsort($files);
+                echo '<div id="mokapos-debug-console" style="position:fixed;bottom:0;left:0;right:0;height:300px;overflow:auto;background:#222;color:#0f0;padding:10px;font-family:monospace;font-size:12px;z-index:99999;border-top:2px solid #0f0;">';
+                echo '<strong>LATEST LOGS:</strong><br>';
+                foreach (array_slice($files, 0, 3) as $file) {
+                    echo "<!-- File: $file -->";
+                    $content = file_get_contents($file);
+                    // Показываем последние 50 строк
+                    $lines = explode("\n", $content);
+                    $last_lines = array_slice($lines, -50);
+                    echo esc_html(implode("\n", $last_lines));
+                    echo "<br>-------------------<br>";
+                }
+                echo '</div>';
+            }
+        }
     }
-    
-    // Очищаем кэш перезаписи правил
-    flush_rewrite_rules();
 }
 
-/**
- * Деактивация плагина
- */
-function mokapos_deactivate() {
-    // Сначала загружаем Logger, так как он нужен другим классам
-    if (!class_exists('MokaPOS\\Logger')) {
-        $logger_file = MOKAPOS_PLUGIN_DIR . 'includes/class-logger.php';
-        if (file_exists($logger_file)) {
-            require_once $logger_file;
-        }
-    }
-    
-    // Загружаем Cron
-    if (!class_exists('MokaPOS\\Cron')) {
-        $cron_file = MOKAPOS_PLUGIN_DIR . 'includes/class-cron.php';
-        if (file_exists($cron_file)) {
-            require_once $cron_file;
-        }
-    }
-    
-    if (class_exists('MokaPOS\\Cron')) {
-        MokaPOS\Cron::deactivate();
-    }
-    
-    // Очищаем кэш перезаписи правил
-    flush_rewrite_rules();
+// Запуск класса
+function run_mokapos_integration() {
+    new MokaPOS_Integration();
 }
-
-/**
- * Удаление плагина
- */
-function mokapos_uninstall() {
-    // Очистка опций при удалении (опционально, раскомментируйте при необходимости)
-    // delete_option('mokapos_client_id');
-    // delete_option('mokapos_client_secret');
-    // delete_option('mokapos_access_token');
-    // delete_option('mokapos_refresh_token');
-    // delete_option('mokapos_sync_prices');
-    // delete_option('mokapos_sync_stock');
-    // delete_option('mokapos_send_orders');
-    // delete_option('mokapos_webhook_secret');
-    
-    // Удаляем директорию с логами
-    if (file_exists(MOKAPOS_LOG_DIR)) {
-        global $wp_filesystem;
-        if (null === $wp_filesystem) {
-            require_once ABSPATH . 'wp-admin/includes/file.php';
-            WP_Filesystem();
-        }
-        $wp_filesystem->delete(MOKAPOS_LOG_DIR, true);
-    }
-}
+add_action('plugins_loaded', 'run_mokapos_integration');
