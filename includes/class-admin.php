@@ -17,6 +17,11 @@ class Admin {
         add_action('admin_menu', [$this, 'add_admin_menu']);
         add_action('admin_init', [$this, 'register_settings']);
         add_filter('plugin_action_links_' . plugin_basename(MOKAPOS_PLUGIN_DIR . '../woocommerce-mokapos.php'), [$this, 'add_plugin_links']);
+        
+        // Регистрируем хуки для OAuth в конструкторе, чтобы они работали корректно
+        add_action('admin_post_mokapos_connect', [$this, 'handle_connect_request']);
+        add_action('admin_post_mokapos_callback', [$this, 'handle_oauth_callback']);
+        add_action('admin_post_mokapos_disconnect', [$this, 'handle_disconnect']);
     }
     
     /**
@@ -44,126 +49,151 @@ class Admin {
         register_setting('mokapos_settings_group', 'mokapos_sync_stock');
         register_setting('mokapos_settings_group', 'mokapos_send_orders');
         register_setting('mokapos_settings_group', 'mokapos_webhook_secret');
-        
-        // Добавляем обработку действий OAuth
-        add_action('admin_post_mokapos_connect', [$this, 'handle_connect_request']);
-        add_action('admin_post_mokapos_callback', [$this, 'handle_oauth_callback']);
-        add_action('admin_post_mokapos_disconnect', [$this, 'handle_disconnect']);
     }
     
     /**
      * Обработка запроса на подключение к MokaPOS
      */
     public function handle_connect_request() {
-        check_admin_referer('mokapos_connect_nonce', 'mokapos_nonce');
-        
-        $client_id = sanitize_text_field($_POST['mokapos_client_id'] ?? '');
-        $client_secret = sanitize_text_field($_POST['mokapos_client_secret'] ?? '');
-        
-        if (empty($client_id) || empty($client_secret)) {
-            wp_redirect(add_query_arg([
-                'page' => 'mokapos-settings',
-                'error' => 'missing_credentials'
-            ], admin_url('options-general.php')));
+        try {
+            // Включаем отображение ошибок для отладки
+            error_reporting(E_ALL);
+            ini_set('display_errors', 1);
+            
+            check_admin_referer('mokapos_connect_nonce', 'mokapos_nonce');
+            
+            $client_id = sanitize_text_field($_POST['mokapos_client_id'] ?? '');
+            $client_secret = sanitize_text_field($_POST['mokapos_client_secret'] ?? '');
+            
+            Logger::log('Connect request started. Client ID: ' . ($client_id ? 'present' : 'empty'), 'debug');
+            
+            if (empty($client_id) || empty($client_secret)) {
+                Logger::log('Missing credentials', 'error');
+                wp_redirect(add_query_arg([
+                    'page' => 'mokapos-settings',
+                    'error' => 'missing_credentials'
+                ], admin_url('options-general.php')));
+                exit;
+            }
+            
+            // Сохраняем credentials
+            update_option('mokapos_client_id', $client_id);
+            update_option('mokapos_client_secret', $client_secret);
+            
+            // Формируем URL для авторизации
+            $redirect_uri = admin_url('admin-post.php?action=mokapos_callback', 'https');
+            
+            // Сохраняем redirect_uri для последующего использования
+            update_option('mokapos_redirect_uri', $redirect_uri);
+            
+            Logger::log('OAuth authorize request. Redirect URI: ' . $redirect_uri, 'debug');
+            
+            $auth_url = add_query_arg([
+                'client_id' => $client_id,
+                'redirect_uri' => urlencode($redirect_uri),
+                'response_type' => 'code',
+                'scope' => 'profile sales_type checkout checkout_api transaction library customer report'
+            ], 'https://service-goauth.mokapos.com/oauth/authorize');
+            
+            Logger::log('Redirecting to: ' . $auth_url, 'debug');
+            
+            // Перенаправляем пользователя на Moka для авторизации
+            wp_redirect($auth_url);
             exit;
+        } catch (\Exception $e) {
+            Logger::log('Exception in handle_connect_request: ' . $e->getMessage(), 'error');
+            error_log('MokaPOS Exception: ' . $e->getMessage());
+            wp_die('Ошибка подключения: ' . $e->getMessage());
         }
-        
-        // Сохраняем credentials
-        update_option('mokapos_client_id', $client_id);
-        update_option('mokapos_client_secret', $client_secret);
-        
-        // Формируем URL для авторизации
-        $redirect_uri = admin_url('admin-post.php?action=mokapos_callback', 'https');
-        
-        // Сохраняем redirect_uri для последующего использования
-        update_option('mokapos_redirect_uri', $redirect_uri);
-        
-        Logger::log('OAuth authorize request. Client ID: ' . $client_id . ', Redirect URI: ' . $redirect_uri, 'debug');
-        
-        $auth_url = add_query_arg([
-            'client_id' => $client_id,
-            'redirect_uri' => urlencode($redirect_uri),
-            'response_type' => 'code',
-            'scope' => 'profile sales_type checkout checkout_api transaction library customer report'
-        ], 'https://service-goauth.mokapos.com/oauth/authorize');
-        
-        Logger::log('Redirecting to: ' . $auth_url, 'debug');
-        
-        // Перенаправляем пользователя на Moka для авторизации
-        wp_redirect($auth_url);
-        exit;
     }
     
     /**
      * Обработка callback от MokaPOS после авторизации
      */
     public function handle_oauth_callback() {
-        // Не проверяем nonce здесь, так как это callback от внешнего сервиса
-        
-        $code = sanitize_text_field($_GET['code'] ?? '');
-        
-        if (empty($code)) {
-            wp_redirect(add_query_arg([
-                'page' => 'mokapos-settings',
-                'error' => 'no_code'
-            ], admin_url('options-general.php')));
-            exit;
-        }
-        
-        $client_id = get_option('mokapos_client_id');
-        $client_secret = get_option('mokapos_client_secret');
-        $redirect_uri = get_option('mokapos_redirect_uri', admin_url('admin-post.php?action=mokapos_callback'));
-        
-        // Обмениваем code на access token
-        $response = wp_remote_post('https://api.mokapos.com/oauth/token', [
-            'headers' => [
-                'Content-Type' => 'application/x-www-form-urlencoded',
-                'Accept' => 'application/json',
-            ],
-            'body' => http_build_query([
-                'grant_type' => 'authorization_code',
-                'client_id' => $client_id,
-                'client_secret' => $client_secret,
-                'code' => $code,
-                'redirect_uri' => $redirect_uri,
-            ]),
-            'timeout' => 30,
-        ]);
-        
-        if (is_wp_error($response)) {
-            Logger::log('OAuth token request error: ' . $response->get_error_message(), 'error');
-            wp_redirect(add_query_arg([
-                'page' => 'mokapos-settings',
-                'error' => 'token_request_failed'
-            ], admin_url('options-general.php')));
-            exit;
-        }
-        
-        $status_code = wp_remote_retrieve_response_code($response);
-        $body = wp_remote_retrieve_body($response);
-        $result = json_decode($body, true);
-        
-        Logger::log('OAuth token response: ' . print_r($result, true), 'debug');
-        
-        if ($status_code === 200 && isset($result['access_token'])) {
-            update_option('mokapos_access_token', $result['access_token']);
+        try {
+            // Включаем отображение ошибок для отладки
+            error_reporting(E_ALL);
+            ini_set('display_errors', 1);
             
-            if (isset($result['refresh_token'])) {
-                update_option('mokapos_refresh_token', $result['refresh_token']);
+            // Не проверяем nonce здесь, так как это callback от внешнего сервиса
+            
+            $code = sanitize_text_field($_GET['code'] ?? '');
+            
+            Logger::log('OAuth callback received. Code: ' . ($code ? 'present' : 'empty'), 'debug');
+            
+            if (empty($code)) {
+                Logger::log('No code received in callback', 'error');
+                wp_redirect(add_query_arg([
+                    'page' => 'mokapos-settings',
+                    'error' => 'no_code'
+                ], admin_url('options-general.php')));
+                exit;
             }
             
-            wp_redirect(add_query_arg([
-                'page' => 'mokapos-settings',
-                'success' => 'connected'
-            ], admin_url('options-general.php')));
-            exit;
-        } else {
-            Logger::log('OAuth token exchange failed: ' . $body, 'error');
-            wp_redirect(add_query_arg([
-                'page' => 'mokapos-settings',
-                'error' => 'token_exchange_failed'
-            ], admin_url('options-general.php')));
-            exit;
+            $client_id = get_option('mokapos_client_id');
+            $client_secret = get_option('mokapos_client_secret');
+            $redirect_uri = get_option('mokapos_redirect_uri', admin_url('admin-post.php?action=mokapos_callback'));
+            
+            Logger::log('Exchanging code for token. Redirect URI: ' . $redirect_uri, 'debug');
+            
+            // Обмениваем code на access token
+            $response = wp_remote_post('https://api.mokapos.com/oauth/token', [
+                'headers' => [
+                    'Content-Type' => 'application/x-www-form-urlencoded',
+                    'Accept' => 'application/json',
+                ],
+                'body' => http_build_query([
+                    'grant_type' => 'authorization_code',
+                    'client_id' => $client_id,
+                    'client_secret' => $client_secret,
+                    'code' => $code,
+                    'redirect_uri' => $redirect_uri,
+                ]),
+                'timeout' => 30,
+            ]);
+            
+            if (is_wp_error($response)) {
+                Logger::log('OAuth token request error: ' . $response->get_error_message(), 'error');
+                wp_redirect(add_query_arg([
+                    'page' => 'mokapos-settings',
+                    'error' => 'token_request_failed'
+                ], admin_url('options-general.php')));
+                exit;
+            }
+            
+            $status_code = wp_remote_retrieve_response_code($response);
+            $body = wp_remote_retrieve_body($response);
+            $result = json_decode($body, true);
+            
+            Logger::log('OAuth token response (status: ' . $status_code . '): ' . print_r($result, true), 'debug');
+            
+            if ($status_code === 200 && isset($result['access_token'])) {
+                update_option('mokapos_access_token', $result['access_token']);
+                
+                if (isset($result['refresh_token'])) {
+                    update_option('mokapos_refresh_token', $result['refresh_token']);
+                }
+                
+                Logger::log('Successfully obtained access token', 'info');
+                
+                wp_redirect(add_query_arg([
+                    'page' => 'mokapos-settings',
+                    'success' => 'connected'
+                ], admin_url('options-general.php')));
+                exit;
+            } else {
+                Logger::log('OAuth token exchange failed (status: ' . $status_code . '): ' . $body, 'error');
+                wp_redirect(add_query_arg([
+                    'page' => 'mokapos-settings',
+                    'error' => 'token_exchange_failed'
+                ], admin_url('options-general.php')));
+                exit;
+            }
+        } catch (\Exception $e) {
+            Logger::log('Exception in handle_oauth_callback: ' . $e->getMessage(), 'error');
+            error_log('MokaPOS Exception: ' . $e->getMessage());
+            wp_die('Ошибка обработки callback: ' . $e->getMessage());
         }
     }
     

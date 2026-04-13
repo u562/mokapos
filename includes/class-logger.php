@@ -38,9 +38,8 @@ class Logger {
      * Логирование отладочной информации
      */
     public static function debug($message) {
-        if (defined('WP_DEBUG') && WP_DEBUG) {
-            self::log('DEBUG', $message);
-        }
+        // Всегда логируем в debug режиме, независимо от WP_DEBUG
+        self::log('DEBUG', $message);
     }
     
     /**
@@ -68,6 +67,11 @@ class Logger {
         
         // Также логируем в стандартный лог WordPress
         error_log("MokaPOS [{$level}]: {$message}");
+        
+        // Если включен WP_DEBUG_LOG, пишем в debug.log
+        if (defined('WP_DEBUG_LOG') && WP_DEBUG_LOG) {
+            error_log("MokaPOS [{$level}]: {$message}", 3, WP_CONTENT_DIR . '/debug.log');
+        }
     }
     
     /**
